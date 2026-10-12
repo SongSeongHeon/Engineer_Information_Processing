@@ -252,7 +252,7 @@ pre.code .blank{background:#FFD34D;color:#17233A;box-shadow:none;outline:1.5px s
 .grade .gx[aria-pressed="true"]{background:var(--bad-soft);border-color:var(--bad)}
 .memo{margin:0 0 12px}
 .memo h3{margin:0 0 8px;font-size:14px}
-.memo textarea{width:100%;min-height:80px;padding:12px 14px;border:1.5px solid var(--line);border-radius:12px;font:15px/1.6 var(--sans);resize:vertical;background:#fff}
+.memo textarea{display:block;width:100%;height:auto;max-height:min(25vh,200px);padding:12px 14px;border:1.5px solid var(--line);border-radius:12px;font:15px/1.6 var(--sans);resize:none;overflow-y:auto;background:#fff}
 .memo textarea:focus{outline:none;border-color:var(--primary);box-shadow:0 0 0 4px var(--primary-soft)}
 .extra.hastbl{white-space:normal}
 .extra .tbltxt{white-space:pre-wrap;margin:0 0 8px}
@@ -6619,7 +6619,7 @@ function renderSolve(){
   const note = notes[q.id] || "";
   h += '<section class="card memo"><h3>내 메모</h3>'
     + ((note || s.memoOpen[q.id])
-        ? '<textarea data-memo placeholder="헷갈린 점, 외울 키워드 등을 적어요" spellcheck="false">'+esc(note)+'</textarea>'
+        ? '<textarea data-memo rows="1" placeholder="헷갈린 점, 외울 키워드 등을 적어요" spellcheck="false">'+esc(note)+'</textarea>'
         : '<button class="btn sm" data-act="memoOpen">메모 쓰기</button>')
     + '</section></main>';
 
@@ -6645,7 +6645,7 @@ function renderSolve(){
     const el = $app.querySelector("[data-inp]");
     if(el && window.matchMedia && window.matchMedia("(hover:hover)").matches){ try{ el.focus({preventScroll:true}); }catch(e){} }
   }
-  calcFit($app.querySelector("[data-calc]"));
+  calcFit($app.querySelector("[data-calc]")); calcFit($app.querySelector("[data-memo]"));
   s.focusNext = false; s.focusMemo = false; s.focusCalc = false;
 }
 
@@ -7462,6 +7462,7 @@ function buildSystem(q){
     + "- 인사, 칭찬, 격려, 감탄, 이모지, 사과, 질문 내용을 되풀이하는 서론, '궁금한 점이 있으면 물어보세요' 같은 맺음말은 쓰지 마. 바로 본론부터 시작해.\n"
     + "- 설명 수준은 줄이지 마. 학생이 이해하는 데 필요한 이유, 풀이 과정, 중간 계산은 빠짐없이 설명해.\n"
     + "- 코드 문제는 코드 줄 번호를 말하면서 변수 값이 어떻게 바뀌는지 따라가며 설명해. 줄 번호는 코드 앞에 붙은 번호만 인용하고, 그 줄의 코드도 함께 적어서 확인할 수 있게 해.\n"
+    + "- 수식은 LaTeX($ 기호, \\times 같은 명령)를 쓰지 말고 일반 글자로 써. 곱하기는 ×, 나누기는 ÷, 거듭제곱은 2^3처럼 적어.\n"
     + "- 확실하지 않은 건 모른다고 말하고, 지어내지 마.\n"
     + "- 학생이 쓴 질문의 뜻을 먼저 정확히 파악하고, 그 질문에 답해. 시험 범위 안에서 설명하고, 같은 설명을 길게 반복하지 마.\n\n"
     + contextBlock(q) + "\n\n";
@@ -7565,11 +7566,38 @@ function chatRestoreEdit(){
   chats[e.qid] = hist.concat(e.backup); save("chats", chats);
   state.chatEdit = null; state.chatDraft = "";
 }
+/* AI가 가끔 LaTeX 수식($5 \\times 2^3$)을 써서 화면에 기호가 깨져 보여요. 일반 글자(5 × 2³)로 바꿔요. 코드는 건드리지 않아요. */
+const SUP = {"0":"⁰","1":"¹","2":"²","3":"³","4":"⁴","5":"⁵","6":"⁶","7":"⁷","8":"⁸","9":"⁹","+":"⁺","-":"⁻","=":"⁼","(":"⁽",")":"⁾","n":"ⁿ","i":"ⁱ"};
+const SUB = {"0":"₀","1":"₁","2":"₂","3":"₃","4":"₄","5":"₅","6":"₆","7":"₇","8":"₈","9":"₉"};
+const TEX_SYM = [["times","×"],["div","÷"],["cdot","·"],["leq?","≤"],["geq?","≥"],["neq?","≠"],["approx","≈"],["rightarrow","→"],["to","→"],["Rightarrow","⇒"],["leftarrow","←"],["oplus","⊕"],["land","∧"],["wedge","∧"],["lor","∨"],["vee","∨"],["lnot","¬"],["neg","¬"],["pm","±"],["infty","∞"],["ldots","…"],["dots","…"],["lfloor","⌊"],["rfloor","⌋"],["lceil","⌈"],["rceil","⌉"],["bmod","mod"],["mod","mod"]];
+function texSyms(x){
+  TEX_SYM.forEach(a => { x = x.replace(new RegExp("\\\\" + a[0] + "(?![A-Za-z])", "g"), a[1]); });
+  return x.replace(/\\([%_&#{}])/g, "$1");
+}
+function texInner(x){
+  for(let k = 0; k < 3; k++){
+    x = x.replace(/\\(?:text|mathrm|mathbf|operatorname|mathit)\{([^{}]*)\}/g, "$1")
+         .replace(/\\frac\{([^{}]*)\}\{([^{}]*)\}/g, "($1)/($2)")
+         .replace(/\\sqrt\{([^{}]*)\}/g, "√($1)");
+  }
+  x = texSyms(x).replace(/\\(?:left|right)\b/g, "").replace(/\\[,;:! ]|\\quad|\\qquad/g, " ");
+  x = x.replace(/\^\{([^{}]*)\}|\^([A-Za-z0-9])/g, (m, a, b) => { const t = a != null ? a : b; return Array.from(t).every(c => SUP[c]) ? Array.from(t).map(c => SUP[c]).join("") : "^" + (t.length > 1 ? "(" + t + ")" : t); });
+  x = x.replace(/_\{([^{}]*)\}|_([A-Za-z0-9])/g, (m, a, b) => { const t = a != null ? a : b; return Array.from(t).every(c => SUB[c]) ? Array.from(t).map(c => SUB[c]).join("") : "_" + t; });
+  return x.replace(/\\([A-Za-z]+)/g, "$1").replace(/[{}]/g, "").replace(/\s{2,}/g, " ").trim();
+}
+function texPlain(s){
+  s = s.replace(/\$\$([\s\S]+?)\$\$/g, (m, x) => texInner(x))
+       .replace(/\\\(([\s\S]+?)\\\)/g, (m, x) => texInner(x))
+       .replace(/\\\[([\s\S]+?)\\\]/g, (m, x) => texInner(x))
+       .replace(/\$([^\s$](?:[^$\n]*?[^\s$])?)\$/g, (m, x) => texInner(x));
+  return texSyms(s);
+}
 function mdLite(src){
   let s = esc(src);
   const blocks = [];
   s = s.replace(/```[A-Za-z0-9+#_-]*\n?([\s\S]*?)```/g, (m, code) => { blocks.push('<pre class="cbk"><code>' + code.replace(/\n$/, "") + '</code></pre>'); return "\u0000" + (blocks.length - 1) + "\u0000"; });
-  s = s.replace(/`([^`\n]+)`/g, "<code>$1</code>");
+  s = s.replace(/`([^`\n]+)`/g, (m, c) => { blocks.push("<code>" + c + "</code>"); return "\u0000" + (blocks.length - 1) + "\u0000"; });
+  s = texPlain(s);
   s = s.replace(/\*\*([^*\n]+)\*\*/g, "<b>$1</b>");
   s = s.replace(/^#{1,4}\s+(.+)$/gm, "<b>$1</b>");
   s = s.replace(/^\s*[-*]\s+/gm, "• ");
@@ -8374,7 +8402,7 @@ $app.addEventListener("input", e => {
   else if(ds.memo !== undefined && state.session){
     const q = curQ(), v = el.value;
     if(v.trim()) notes[q.id] = v; else delete notes[q.id];
-    delete HAY[q.id]; save("notes", notes);
+    delete HAY[q.id]; save("notes", notes); calcFit(el);
   }
   else if(ds.tool !== undefined){
     state.toolIn[ds.tool][ds.k] = el.value;
