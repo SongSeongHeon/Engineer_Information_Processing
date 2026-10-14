@@ -7299,7 +7299,23 @@ async function gem(path, body, method, signal){
   return data;
 }
 /* 답변을 조금씩 받아요 (SSE). 이미 일부를 받은 뒤 끊기면 err.partial 로 표시해요. */
+const STREAM_WAIT_MS = 20000;
+/* 20초 안에 첫 글자가 안 오면 서버가 바쁜 것으로 보고(503) 다시 시도하거나 다른 모델로 넘어가요 */
 async function gemStream(model, body, signal, onDelta){
+  const tc = new AbortController();
+  let timedOut = false, timer = 0;
+  const userAbort = () => tc.abort();
+  if(signal){ if(signal.aborted) tc.abort(); else signal.addEventListener("abort", userAbort, {once: true}); }
+  timer = setTimeout(() => { timedOut = true; tc.abort(); }, STREAM_WAIT_MS * RETRY_SCALE());
+  const first = t => { if(timer){ clearTimeout(timer); timer = 0; } onDelta(t); };
+  try{ return await gemStreamRaw(model, body, tc.signal, first); }
+  catch(e){
+    if(e && e.aborted && timedOut && !(signal && signal.aborted)){ const er = new Error("timeout"); er.status = 503; er.timeout = true; throw er; }
+    throw e;
+  }
+  finally{ if(timer) clearTimeout(timer); if(signal) signal.removeEventListener("abort", userAbort); }
+}
+async function gemStreamRaw(model, body, signal, onDelta){
   let res;
   try{
     res = await fetch(GAPI + "/models/" + encodeURIComponent(model) + ":streamGenerateContent?alt=sse", {
@@ -7341,16 +7357,20 @@ async function gemStream(model, body, signal, onDelta){
   if(!text.trim()){ const er = new Error("blocked"); er.blocked = true; throw er; }
   return {text: finish === "MAX_TOKENS" ? text + "\n\n(답변이 길어서 중간에 끊겼어요. '이어서 설명해줘'라고 물어보세요.)" : text, finish: finish};
 }
+const ALT_MODEL = "gemini-3.6-flash";
+/* 서버가 바쁘면 다른 모델로 바꿔 봐요: Flash-Lite가 안 되면 3.6 Flash로, 그 밖의 모델은 Flash-Lite로 */
 function modelChain(primary){
   const p = primary || AI_DEFAULT_MODEL;
-  return ai.fallback !== false && p !== FALLBACK_MODEL && !/lite/.test(p) ? [p, FALLBACK_MODEL] : [p];
+  if(ai.fallback === false) return [p];
+  const other = /lite/.test(p) ? ALT_MODEL : FALLBACK_MODEL;
+  return other === p ? [p] : [p, other];
 }
 /* 일시적인 오류(429, 408, 5xx)는 기다렸다가 다시 시도하고, 계속 안 되면 가벼운 모델로 바꿔요. */
 async function withRetry(call, o){
-  const models = o.models, max = 3;
+  const models = o.models;
   let lastErr = null;
   for(let mi = 0; mi < models.length; mi++){
-    const model = models[mi];
+    const model = models[mi], max = mi < models.length - 1 ? 2 : 3;
     for(let a = 0; a < max; a++){
       if(o.signal && o.signal.aborted) throw abortErr();
       try{ return {model: model, fell: mi > 0, value: await call(model)}; }
@@ -7383,8 +7403,8 @@ function errMsg(e){
   if(s === 401) return "키를 인증하지 못했어요(401). 키를 통째로 다시 복사해 붙여 넣어 보세요. 계속되면 AI Studio에서 새 키를 만들어 다시 시도해 보세요. 키가 삭제됐거나 정지된 건 아닌지도 확인해 주세요.";
   if(s === 403) return "이 키로는 쓸 수 없어요. AI Studio에서 키가 켜져 있는지, 사용 제한이 걸려 있지 않은지 확인해 주세요.";
   if(s === 404) return "선택한 모델을 찾을 수 없어요. 더보기에서 다른 모델을 고르거나, 직접 입력한 이름이 맞는지 확인해 주세요.";
-  if(s === 429) return "요청 한도에 걸렸어요(분당 한도). 자동으로 여러 번 다시 시도했지만 계속 막혀요. 1분쯤 뒤에 다시 시도하거나, 더보기에서 Gemini 3.5 Flash-Lite로 바꿔 보세요. 계속되면 오늘 무료 한도를 다 쓴 걸 수도 있어요.";
-  if(s >= 500) return "Google 서버가 지금 많이 바빠요(수요가 몰리는 중이에요). 자동으로 여러 번 다시 시도했지만 안 됐어요. 잠시 뒤에 다시 시도하거나, 더보기에서 Gemini 3.5 Flash-Lite로 바꿔 보세요.";
+  if(s === 429) return "요청 한도에 걸렸어요(분당 한도). 자동으로 여러 번 다시 시도했지만 계속 막혀요. 1분쯤 뒤에 다시 시도하거나, 더보기에서 다른 모델로 바꿔 보세요. 계속되면 오늘 무료 한도를 다 쓴 걸 수도 있어요.";
+  if(s >= 500) return "Google 서버가 지금 많이 바빠요(수요가 몰리는 중이에요). 자동으로 여러 번 다시 시도했지만 안 됐어요. 잠시 뒤에 다시 시도하거나, 더보기에서 다른 모델로 바꿔 보세요.";
   return "연결하지 못했어요. 인터넷 연결을 확인해 주세요. (" + m.slice(0, 60) + ")";
 }
 const AI_MODELS = [
@@ -7774,7 +7794,7 @@ function aiCardHTML(){
     + '<div class="drow" style="margin:0 0 14px"><button class="btn sm primary" data-act="aiSave">저장</button><button class="btn sm" data-act="aiTest" ' + (state.aiBusy ? "disabled" : "") + '>' + (state.aiBusy ? "확인 중..." : "연결 테스트") + '</button></div>'
     + msg
     + '<label class="chk" style="margin:0 0 10px"><input type="checkbox" data-ai="hint" ' + (ai.hint ? "checked" : "") + '>정답을 보기 전에는 힌트 위주로 알려주기</label>'
-    + '<label class="chk" style="margin:0 0 10px"><input type="checkbox" data-ai="fallback" ' + (ai.fallback !== false ? "checked" : "") + '>서버가 계속 바쁘면 Gemini 3.5 Flash-Lite로 자동 전환</label>'
+    + '<label class="chk" style="margin:0 0 10px"><input type="checkbox" data-ai="fallback" ' + (ai.fallback !== false ? "checked" : "") + '>서버가 계속 바쁘면 다른 모델(Flash-Lite ↔ 3.6 Flash)로 자동 전환</label>'
     + '<label class="chk" style="margin:0 0 14px"><input type="checkbox" data-ai="img" ' + (ai.img ? "checked" : "") + '>이미지 문제는 이미지도 같이 보내기</label>'
     + (hasKey ? '<h3 class="mini">다른 기기로 키 옮기기</h3><p class="d">PC에서 설정했다면 폰에서 다시 만들 필요가 없어요. 아래 버튼으로 연결 링크를 복사해서 카카오톡 \'나와의 채팅\' 같은 곳에 붙여 넣고, 폰에서 그 링크를 열면 키가 바로 저장돼요.</p>'
       + '<div class="drow"><button class="btn sm" data-act="aiLink">연결 링크 복사</button></div>'
@@ -7873,10 +7893,12 @@ Object.assign(actions, {
     const mi = document.getElementById("aimodel");
     if(mi && mi.value.trim()){ m = mi.value.trim().replace(/^models\//, ""); if(!MODEL_RE.test(m)){ state.aiMsg = {err: true, t: "모델 이름 모양이 달라요. 소문자, 숫자, 점, 하이픈만 쓰고 공백 없이 적어 주세요."}; render(); return; } ai.model = m; save("ai", ai); }
     state.aiBusy = true; state.aiMsg = null; render();
+    const tc = new AbortController(), tm = setTimeout(() => tc.abort(), 20000);
     try{
-      const data = await gem("/models/" + encodeURIComponent(m) + ":generateContent", {contents: [{role: "user", parts: [{text: "한국어로 '연결됨' 한 단어만 답해줘."}]}]});
+      const data = await gem("/models/" + encodeURIComponent(m) + ":generateContent", {contents: [{role: "user", parts: [{text: "한국어로 '연결됨' 한 단어만 답해줘."}]}]}, "POST", tc.signal);
       state.aiMsg = {err: false, t: "연결됐어요. 모델 " + m + "의 응답: " + extractText(data).slice(0, 40)};
-    }catch(e){ state.aiMsg = {err: true, t: errMsg(e)}; }
+    }catch(e){ state.aiMsg = {err: true, t: e && e.aborted ? "20초 안에 응답이 오지 않았어요. 키 문제가 아니라 Google 서버가 바쁜 상태로 보여요. 잠시 뒤 다시 시도하거나, 더보기에서 다른 모델을 골라 테스트해 보세요." : errMsg(e)}; }
+    clearTimeout(tm);
     state.aiBusy = false; render();
   },
   aiDelKey(){
